@@ -22,7 +22,7 @@ def string_for_action(action):
         return 'TRIGGER'
 
 
-def draw_sequences(i, k, step, action, draw, region_image, background, path_testing_folder, iou, reward,
+def draw_sequences(i, step, action, draw, region_image, background, path_testing_folder, iou, reward,
                    gt_mask, region_mask, image_name, save_boolean):
     mask = Image.fromarray(255 * gt_mask)
     mask_img = Image.fromarray(255 * region_mask)
@@ -37,7 +37,7 @@ def draw_sequences(i, k, step, action, draw, region_image, background, path_test
     background.paste(img_for_paste, image_offset)
     background.paste(mask, mask_offset)
     background.paste(mask_img, masked_image_offset)
-    file_name = path_testing_folder + '/' + image_name + str(i) + '_object_' + str(k) + '.png'
+    file_name = path_testing_folder + '/' + image_name + str(i) + '_object_.png'
     if save_boolean == 1:
         background.save(file_name)
     return background

@@ -74,13 +74,13 @@ def get_reward_trigger(new_iou):
 # consider changing this.....
 def get_q_network(weights_path):
     model = Sequential()
-    model.add(Dense(1024, init=lambda shape, name: normal(shape, scale=0.01, name=name), input_shape=(25112,)))
+    model.add(Dense(1024, input_shape=(1024,)))
     model.add(Activation('relu'))
     model.add(Dropout(0.2))
-    model.add(Dense(1024, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
+    model.add(Dense(1024))
     model.add(Activation('relu'))
     model.add(Dropout(0.2))
-    model.add(Dense(6, init=lambda shape, name: normal(shape, scale=0.01, name=name)))
+    model.add(Dense(6))
     model.add(Activation('linear'))
     adam = Adam(lr=1e-6)
     model.compile(loss='mse', optimizer=adam)
@@ -97,4 +97,16 @@ def get_q_network_for_lesion(weights_path, class_object):
     else:
         q_network = get_q_network(weights_path + "/model" + str(class_object) + "h5")
 
-    return q_networks
+    return q_network
+
+
+def convNet(weights_path=None):
+    densenet = keras.applications.densenet.DenseNet121(include_top=False, weights='imagenet')
+    model = Sequential()
+    model.add(densenet)
+    model.add(keras.layers.AveragePooling2D(pool_size= (8, 8)))
+    if weights_path:
+        model.load_weights(weights_path)
+    sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
+    model.compile(optimizer=sgd, loss='categorical_crossentropy')
+    return model

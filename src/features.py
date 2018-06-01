@@ -200,108 +200,50 @@ def calculate_all_initial_feature_maps(images, model, image_names):
 
 
 def get_image_descriptor_for_image(image, model):
-    im = cv2.resize(image, (224, 224)).astype(np.float32)
+    #im = cv2.resize(image, (224, 224)).astype(np.float32)
+    im = image
     dim_ordering = K.image_dim_ordering()
     if dim_ordering == 'th':
         # 'RGB'->'BGR'
         im = im[::-1, :, :]
         # Zero-center by mean pixel
-        im[0, :, :] -= 103.939
-        im[1, :, :] -= 116.779
-        im[2, :, :] -= 123.68
+        im[0, :, :] -= 61.4
+        im[1, :, :] -= 61.4
+        im[2, :, :] -= 61.4
     else:
         # 'RGB'->'BGR'
         im = im[:, :, ::-1]
         # Zero-center by mean pixel
-        im[:, :, 0] -= 103.939
-        im[:, :, 1] -= 116.779
-        im[:, :, 2] -= 123.68
+        im[:, :, 0] -= 61.4
+        im[:, :, 1] -= 61.4
+        im[:, :, 2] -= 61.4
     im = im.transpose((2, 0, 1))
     im = np.expand_dims(im, axis=0)
     inputs = [K.learning_phase()] + model.inputs
-    _convout1_f = K.function(inputs, [model.layers[33].output])
+    _convout1_f = K.function(inputs, [model.layers[-1].output])
     return _convout1_f([0] + [im])
 
 
 def get_conv_image_descriptor_for_image(image, model):
     # TODO: change mean values
-    im = cv2.resize(image, (224, 224)).astype(np.float32)
+    im =
     dim_ordering = K.image_dim_ordering()
     if dim_ordering == 'th':
         # 'RGB'->'BGR'
         im = im[::-1, :, :]
         # Zero-center by mean pixel
-        im[0, :, :] -= 103.939
-        im[1, :, :] -= 116.779
-        im[2, :, :] -= 123.68
+        im[0, :, :] -= 61.4
+        im[1, :, :] -= 61.4
+        im[2, :, :] -= 61.4
     else:
         # 'RGB'->'BGR'
         im = im[:, :, ::-1]
         # Zero-center by mean pixel
-        im[:, :, 0] -= 103.939
-        im[:, :, 1] -= 116.779
-        im[:, :, 2] -= 123.68
+        im[:, :, 0] -= 61.4
+        im[:, :, 1] -= 61.4
+        im[:, :, 2] -= 61.4
     im = im.transpose((2, 0, 1))
     im = np.expand_dims(im, axis=0)
     inputs = [K.learning_phase()] + model.inputs
-    _convout1_f = K.function(inputs, [model.layers[31].output])
+    _convout1_f = K.function(inputs, [model.layeres[-1].output])
     return _convout1_f([0] + [im])
-
-
-def obtain_compiled_vgg_16(vgg_weights_path):
-    model = vgg_16(vgg_weights_path)
-    sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
-    model.compile(optimizer=sgd, loss='categorical_crossentropy')
-    return model
-
-
-def vgg_16(weights_path=None):
-    model = Sequential()
-    model.add(ZeroPadding2D((1, 1), input_shape=(3, 224, 224)))
-    model.add(Convolution2D(64, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(64, 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
-
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(128, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(128, 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
-
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(256, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(256, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(256, 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
-
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(512, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(512, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(512, 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
-
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(512, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(512, 3, 3, activation='relu'))
-    model.add(ZeroPadding2D((1, 1)))
-    model.add(Convolution2D(512, 3, 3, activation='relu'))
-    model.add(MaxPooling2D((2, 2), strides=(2, 2)))
-
-    model.add(Flatten())
-    model.add(Dense(4096, activation='relu'))
-    model.add(Dropout(0.5))
-    model.add(Dense(4096, activation='relu'))
-    model.add(Dropout(0.5))
-    model.add(Dense(1000, activation='softmax'))
-
-    if weights_path:
-        model.load_weights(weights_path)
-
-    return model
-

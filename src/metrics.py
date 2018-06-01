@@ -21,18 +21,14 @@ def calculate_overlapping(img_mask, gt_mask):
     return overlap
 
 
-def follow_iou(gt_masks, mask, array_classes_gt_objects, object_id, last_matrix, available_objects):
-    results = np.zeros([np.size(array_classes_gt_objects), 1])
-    for k in range(np.size(array_classes_gt_objects)):
-        if array_classes_gt_objects[k] == object_id:
-            if available_objects[k] == 1:
-                gt_mask = gt_masks[:, :, k]
-                iou = calculate_iou(mask, gt_mask)
-                results[k] = iou
-            else:
-                results[k] = -1
+def follow_iou(gt_mask, mask, last_matrix):
+
+
+    iou = calculate_iou(mask, gt_mask)
+    results = iou
+
     max_result = max(results)
     ind = np.argmax(results)
     iou = last_matrix[ind]
     new_iou = max_result
-    return iou, new_iou, results, ind
+    return iou, new_iou, results
