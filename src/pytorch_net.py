@@ -94,10 +94,10 @@ def calculate_overlapping(img_mask, gt_mask):
 	return overlap
 
 
-class Environment(object):
-	def __init__(self, max_steps, max_frames, epsilon):
+class Agent(object):
+	def __init__(self, max_steps=6, max_frames=5000, epsilon=1):
 		"init actions"
-		super(Environment, self).__init__()
+		super(Agent, self).__init__()
 		self.state       = None
 		self.action      = 0
 		self.reward      = -1
@@ -109,12 +109,13 @@ class Environment(object):
 		self.gamma       = 0.1 # discount factor
 		self.iou_thresh  = 0.6
 		self.prev_iou    = 0
-		self.memory_capacity    = 1000
+		self.memory_capacity    = 5000
 		self.terminal_reward    = 3
 		self.momentum_reward    = 1
 		self.number_of_actions  = 6
 		self.history_of_actions = 4 # number of actions to be used in QNetwork
 		self.history_vec = np.zeros(self.history_of_actions, self.number_of_actions)
+		self.exp_memory  = replayBuffer(self.memory_capacity)
 		self.scale_subregion = float(3)/4
 		self.scale_mask = float(1)/(scale_subregion*4)
 
@@ -139,6 +140,9 @@ class Environment(object):
 		# self.exp_memory  = replayBuffer(self.memory_capacity)
 		self.history_vec = np.zeros(self.history_of_actions, self.number_of_actions)
 		self.done        = False
+
+	def buffer_reset(self):
+		self.exp_memory  = replayBuffer(self.memory_capacity)
 
 	def step(self, state, gt_mask):
 		"""Each step to update reward, state and action:
@@ -255,7 +259,7 @@ class Environment(object):
 	def fit(self, batch_size):
 		"Weight update for combined network.."
 		#-------------------- SETTINGS: LOSS
-		loss = torch.nn.BCELoss()
+		loss = torch.nn.MSELoss()
 		step = 0
 		prev_loss = float('inf')
 		for i in range(int(self.memory_capacity/ batch_size)):
