@@ -145,7 +145,7 @@ class Agent(object):
 		self.gamma       = 0.1 # discount factor
 		self.iou_thresh  = 0.5
 		self.prev_iou    = 0
-		self.memory_capacity    = 5000
+		self.memory_capacity    = 1500
 		self.terminal_reward    = 3
 		self.momentum_reward    = 1
 		self.number_of_actions  = 6
@@ -227,18 +227,16 @@ class Agent(object):
 
 			elif self.action == 4:
 				offset_aux = (self.size_mask[0] * self.scale_mask, self.size_mask[1] * self.scale_mask)
-				self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
 
 			elif self.action == 5:
 				offset_aux = (self.size_mask[0] * self.scale_mask/2., self.size_mask[1] * self.scale_mask/2.)
-				self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
-
 			
 			self.offset = (int(self.offset[0] + offset_aux[0]), int(self.offset[1] + offset_aux[1]))
 
 			# self.state = self.curr_state[:, :, int(offset_aux[0]):int(offset_aux[0] + size_mask[0]), int(offset_aux[1]):int(offset_aux[1] + size_mask[1])]
 			self.region_mask[int(self.offset[0]):int(self.offset[0] + self.size_mask[0]), int(self.offset[1]):int(self.offset[1] + self.size_mask[1])] = 1
 			self.prev_mask = self.region_mask
+			self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
 			self.reward  = self.get_reward()
 			
 				
