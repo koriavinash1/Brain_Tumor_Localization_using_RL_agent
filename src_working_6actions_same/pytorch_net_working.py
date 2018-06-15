@@ -21,9 +21,111 @@ import matplotlib.pyplot as plt
 from torchvision.models.resnet import model_urls as resnetmodel_urls
 from tqdm import tqdm
 
-from Networks import *
-from ReplayBuffer import *
-from helpers import *
+class replayBuffer(object):
+	"""
+		
+	"""
+	def __init__(self, capacity):
+		self.capacity = capacity
+		self.buffer   = []
+		self.position = 0
+
+	def sample(self, batch_size=1):
+		# random sampling for training Q network
+		batch = random.sample(self.buffer, batch_size)
+		state, action, hist_vec, reward, next_state, done = map(np.stack, zip(*batch))
+		return state, action, hist_vec, reward, next_state, done
+
+	def push(self, _vec):
+		# _vec:[state, action, reward, next_state, done]
+		if len(self.buffer) < self.capacity:
+			self.buffer.append(None)
+		self.buffer[self.position] = _vec
+		self.position = (self.position + 1) % self.capacity
+		pass
+
+	def __len__(self):
+		return len(self.buffer)
+
+
+class QNetwork(nn.Module):
+	"""
+		
+	"""
+	def __init__(self, num_inputs, num_actions):
+		super(QNetwork, self).__init__()
+		# num_inputs = number of feature outputs + 4 past actions 24
+		# self.features     = nn.Sequential(OrderedDict([]))
+		# self.features.add_module('layer1', nn.ReLU(nn.Linear(1048, 1024)))
+		# self.features.add_module('layer2', nn.ReLU(nn.Linear(1024, 512)))
+		# self.features.add_module('layer3', nn.ReLU(nn.Linear(512, 6)))
+
+
+		self.layer1 = nn.Linear(1048,1024)
+		self.layer2 = nn.Linear(1024, 512)
+		self.layer3 =nn.Linear(512, 6)
+
+	def forward(self, state, past_actions):
+		x = torch.cat([state.float(), past_actions.float()], 1)
+		actions= self.layer3(self.layer2(self.layer1(x)))
+		# actions = self.features(x)
+		return actions
+
+
+class featureExtractor(nn.Module):
+	"""
+		
+	"""
+	def __init__(self):
+		super(featureExtractor, self).__init__()
+		self.net = torchvision.models.densenet121(pretrained=True)
+		self.net = nn.Sequential(*list(self.net.features.children())[:-3])
+		self.net.add_module('adaptive', nn.AdaptiveAvgPool2d((1,1)))
+
+	def forward(self, x):
+		x = self.net(x)
+		shape = x.size()[1]
+		x = x.view(-1, shape)
+		return x
+
+
+class combinedNetwork(nn.Module):
+	"""
+		combined net for 
+	"""
+	def __init__(self, ninputs, nactions):
+		super(combinedNetwork, self).__init__()
+		self.features = featureExtractor().cuda()
+		self.Qnet     = QNetwork(num_inputs = ninputs, num_actions = 4).cuda()
+
+	def forward(self, x, history_vec):
+		# print (x.size(), history_vec.size())
+		x = self.features(x)		
+		x = self.Qnet(x, history_vec)
+		return x
+
+def calculate_iou(img_mask, gt_mask):
+	"""
+		for reward
+	"""
+	img_mask = np.uint8(img_mask)
+	gt_mask  = np.uint8(gt_mask)
+	# print (np.unique(img_mask), np.unique(gt_mask))
+	img_and = np.sum((img_mask > 0)*(gt_mask > 0))
+	img_or = np.sum((img_mask > 0)) + np.sum((gt_mask > 0))
+	iou = 2.0 * float(img_and)/(float(img_or) + 1e-3)
+	return iou
+
+
+def calculate_overlapping(img_mask, gt_mask):
+	"""
+	"""
+	gt_mask *= 1.0
+	img_and = cv2.bitwise_and(img_mask, gt_mask)
+	j = np.count_nonzero(img_and)
+	i = np.count_nonzero(gt_mask)
+	overlap = float(j)/(abs(float(i)) + 1e-3)
+	return overlap
 
 
 class Agent(object):
@@ -43,7 +145,7 @@ class Agent(object):
 		self.gamma       = 0.1 # discount factor
 		self.iou_thresh  = 0.5
 		self.prev_iou    = 0
-		self.memory_capacity    = 5000
+		self.memory_capacity    = 1500
 		self.terminal_reward    = 3
 		self.momentum_reward    = 1
 		self.number_of_actions  = 6
@@ -125,18 +227,16 @@ class Agent(object):
 
 			elif self.action == 4:
 				offset_aux = (self.size_mask[0] * self.scale_mask, self.size_mask[1] * self.scale_mask)
-				self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
 
 			elif self.action == 5:
 				offset_aux = (self.size_mask[0] * self.scale_mask/2., self.size_mask[1] * self.scale_mask/2.)
-				self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
-
 			
 			self.offset = (int(self.offset[0] + offset_aux[0]), int(self.offset[1] + offset_aux[1]))
 
 			# self.state = self.curr_state[:, :, int(offset_aux[0]):int(offset_aux[0] + size_mask[0]), int(offset_aux[1]):int(offset_aux[1] + size_mask[1])]
 			self.region_mask[int(self.offset[0]):int(self.offset[0] + self.size_mask[0]), int(self.offset[1]):int(self.offset[1] + self.size_mask[1])] = 1
 			self.prev_mask = self.region_mask
+			self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
 			self.reward  = self.get_reward()
 			
 				

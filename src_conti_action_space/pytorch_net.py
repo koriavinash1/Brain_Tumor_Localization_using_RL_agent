@@ -20,14 +20,15 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from torchvision.models.resnet import model_urls as resnetmodel_urls
 from tqdm import tqdm
+from skimage.transform import resize
 
-from Networks import *
 from ReplayBuffer import *
+from Networks import *
 from helpers import *
 
 
 class Agent(object):
-	def __init__(self, max_steps=6, max_frames=5000, epsilon=1):
+	def __init__(self, max_steps=6, max_frames=5000, epsilon=1, verbose= True):
 		"init actions"
 		super(Agent, self).__init__()
 		self.state       = None
@@ -46,22 +47,20 @@ class Agent(object):
 		self.memory_capacity    = 5000
 		self.terminal_reward    = 3
 		self.momentum_reward    = 1
-		self.number_of_actions  = 6
-		self.history_of_actions = 4 # number of actions to be used in QNetwork
+		self.number_of_actions  = 4 # 2 coordinates to define bounding box
+		self.history_of_actions = 4 # number of actions to be used as history in QNetwork
+
 		self.history_vec = np.zeros((self.history_of_actions, self.number_of_actions))
 		self.exp_memory  = replayBuffer(self.memory_capacity)
-		self.scale_subregion = float(3)/4
-		self.scale_mask = float(1)/(self.scale_subregion*4)
-		self.cum_rewards = []
-		self.done = False
 
-		self.cnet       = combinedNetwork(1024 + self.history_of_actions*self.number_of_actions, 
+		self.scale_subregion = float(3)/4
+		self.scale_mask      = float(1)/(self.scale_subregion*4)
+		self.cum_rewards     = []
+		self.done = False
+		self.verbose = verbose 
+
+		self.cnet = combinedNetwork(1024 + self.history_of_actions*self.number_of_actions, 
 							self.number_of_actions) # combined network fro training
-		# data= torch.autograd.Variable(torch.rand(1,3,240,240).cuda())
-		# his_vec =   torch.autograd.Variable(torch.rand(1,24).cuda())
-		# pred = self.cnet(data,his_vec)
-		# print ('i am here')
-		# print (pred.size())
 
 	def reset(self):
 		"resets action and steps..."
@@ -90,86 +89,61 @@ class Agent(object):
 		self.exp_memory  = replayBuffer(self.memory_capacity)
 
 	def step(self, state, gt_mask):
-		"""Each step to update reward, state and action:
-		Action space:
-			>> action 1: no motion
-			>> action 2: right motion
-			>> action 3: left motion
-			>> action 4: diag motion 0.5 step
-			>> action 5: diag motion 0.4 step
-			>> action 6: terminal action...
 		"""
-		if self.curr_step == 0: self.prev_mask = np.ones_like(gt_mask)
+
+		"""
+		self.region_mask = np.zeros_like(gt_mask) + 1.0
 		self.curr_state = state
 		self.gt_mask = gt_mask
 		self.curr_step += 1
-		self.region_mask = np.zeros_like(self.gt_mask)
-		self.action = self.get_action()
-		self.state = torch.zeros_like(state)
-		
-		if self.action == self.number_of_actions:
-			self.reward = self.get_reward(terminal=True)
-			self.done = True
-			self.cum_rewards.append(self.cum_reward)
-			self.region_mask = self.prev_mask
-			
-		else:
-			if self.action == 1:
-				offset_aux = (0, 0)
-			
-			elif self.action == 2:
-				offset_aux = (0, self.size_mask[0] * self.scale_subregion/2)
-				
-			elif self.action == 3:
-				offset_aux = (self.size_mask[0] * self.scale_subregion/2, 0)
+		self.locations = self.get_action()
+		self.curr_iou  = calculate_iou(self.region_mask, self.gt_mask)
 
-			elif self.action == 4:
-				offset_aux = (self.size_mask[0] * self.scale_mask, self.size_mask[1] * self.scale_mask)
-				self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
-
-			elif self.action == 5:
-				offset_aux = (self.size_mask[0] * self.scale_mask/2., self.size_mask[1] * self.scale_mask/2.)
-				self.size_mask = (int(self.size_mask[0] * self.scale_subregion), int(self.size_mask[1] * self.scale_subregion))
-
-			
-			self.offset = (int(self.offset[0] + offset_aux[0]), int(self.offset[1] + offset_aux[1]))
-
-			# self.state = self.curr_state[:, :, int(offset_aux[0]):int(offset_aux[0] + size_mask[0]), int(offset_aux[1]):int(offset_aux[1] + size_mask[1])]
-			self.region_mask[int(self.offset[0]):int(self.offset[0] + self.size_mask[0]), int(self.offset[1]):int(self.offset[1] + self.size_mask[1])] = 1
-			self.prev_mask = self.region_mask
-			self.reward  = self.get_reward()
-			
-				
-		self.state[:,0,:,:] = self.curr_state[:,0,:,:]*torch.from_numpy(self.region_mask).float()
-		self.state[:,1,:,:] = self.curr_state[:,1,:,:]*torch.from_numpy(self.region_mask).float()
-		self.state[:,2,:,:] = self.curr_state[:,2,:,:]*torch.from_numpy(self.region_mask).float()
-
+		# for visualization....
 		self.states.append(self.curr_state)
 		self.region_masks.append(self.region_mask)
-		self.actions.append(self.action)
+		self.actions.append(self.locations)
 		self.rewards.append(self.reward)
 		self.ious.append(self.curr_iou)
 
+		shape = gt_mask.shape
+		locations = np.array([(0.5*(c[0]+1)*shape[0], 0.5*(c[1]+1)*shape[1]) for c in self.locations], dtype='int32')
+		locations[1, 0] = locations[0, 0] + abs(locations[1, 0] - locations[0, 0])
+		locations[1, 1] = locations[0, 1] + abs(locations[1, 1] - locations[0, 1]) 
+
+		if locations[1, 0] == locations[0, 0]: locations[1, 0] = locations[0, 0] + 32
+
+		if locations[1, 1] == locations[0, 1]: locations[1, 1] = locations[0, 1] + 32
+
+		if (self.curr_step > self.max_steps) or (self.curr_iou < 0.05 and self.curr_step > 3):
+			self.reward = self.get_reward(terminal=True)
+			self.done = True
+			self.cum_rewards.append(np.sum(self.rewards))
+			
+		else:
+			self.reward = self.get_reward()
+		self.state = self.curr_state[:,:, locations[0, 0]:locations[1, 0], locations[0, 1]:locations[1, 1]]
+		self.state = F.adaptive_avg_pool2d(self.state, self.size_mask)
+
+		self.gt_mask = self.gt_mask[locations[0, 0]:locations[1, 0], locations[0, 1]:locations[1, 1]]
+		self.gt_mask = resize(self.gt_mask, self.size_mask)
+
 		self.prev_iou = self.curr_iou
-		self.cum_reward += self.reward
 		return self.curr_state, self.action, self.history_vec, self.reward, self.state, self.done
 
 	def get_reward(self, terminal=False):
 
 		if not terminal:
-			self.curr_iou = calculate_iou(self.region_mask, self.gt_mask)
 			if self.curr_iou <= self.prev_iou:
 				reward = -1*self.momentum_reward
 			else:
 				reward = 1*self.momentum_reward
 		else:
-			self.curr_iou = calculate_iou(self.prev_mask, self.gt_mask)
 			if self.curr_iou > self.iou_thresh:
 				reward = 1*self.terminal_reward
 			else:
 				reward = -1*self.terminal_reward
-		
-		# reward = 100*(self.curr_iou - self.prev_iou)
+
 		return reward
 
 	def update_replay_buffer(self, _vec):
@@ -181,37 +155,32 @@ class Agent(object):
 		"returns action for a given state..."
 		# terminating action
 		# curr_state shape > (32, 32, 3)
-		qval = np.zeros(self.number_of_actions)
-		
-		if (len(self.states) > 2)and ((self.curr_step > self.max_steps) or self.curr_iou >= 0.8 or self.curr_iou <= 0.05):
-			action = self.number_of_actions
-			qval[action -1] = 1.
 
-		elif random.random() < self.epsilon:
-			action = np.random.randint(1, self.number_of_actions+1)
-			qval[action -1] = 1
+		
+		if random.random() < self.epsilon:
+			locations = np.random.rand(2, 2)
 		
 		else:	
-			_hist = torch.autograd.Variable(torch.from_numpy(self.history_vec.reshape(1, self.history_of_actions*self.number_of_actions)).cuda())
+			_hist = torch.autograd.Variable(torch.from_numpy(self.history_vec.reshape(1, self.history_of_actions*self.number_of_actions))).cuda()
 			_state = torch.autograd.Variable(self.curr_state.cuda())
-			qval = self.cnet(_state, _hist).detach().cpu().numpy()
-			action = (np.argmax(qval))+1
+			locations = self.cnet(_state, _hist).detach().cpu().numpy()
 		
-		print ("Mask size: ", self.size_mask, "; Current IOU: ", self.curr_iou,  "; Done: ", self.done, "; Action: ", action, "; Reward: ", self.reward, "; Offset: ", self.offset, "; Exploration fraction: ", self.epsilon)
+		if self.verbose:
+			print ("Mask size: ", self.size_mask, "; Current IOU: ", self.curr_iou,  "; Done: ", self.done, "; Locations: ", locations, "; Reward: ", self.reward,  "; Exploration fraction: ", self.epsilon)
 
-		self.update_history_vec(qval)
-		return action
+		self.update_history_vec(locations)
+		return locations
 
 	def visualization(self, path, save=False, display= False):
 		"saves an image for visualization also does contour based segmentation"
-		# TODO:
+		
 		if len(self.states) == 0:
 			return
 		else:
 			for i in range(len(self.states)):
 				plt.subplot(3, len(self.states), i+1)
 				plt.imshow(np.array(self.states[i].numpy()[0,0,:,:]), cmap = 'gray')
-				plt.title('a:' + str(self.actions[i]) + ' r:' + str(self.rewards[i]))
+				plt.title(' r:' + str(self.rewards[i]))
 				plt.xlabel('iou: {:.2f}'.format(self.ious[i]))
 				plt.gca().axes.get_xaxis().set_ticks([])
 				plt.gca().axes.get_yaxis().set_ticks([])
@@ -295,7 +264,7 @@ class Agent(object):
 			step += 1
 		pass
 
-	def batch_train(self, X_state_train, X_hist_train, y_train, loss, optimizer):
+	def batch_train(self, X_state_train, X_hist_train, y_train,loss,optimizer):
 
 		varOutput = self.cnet(X_state_train, X_hist_train)
 		# print varInput.size(), varOutput.size(), target.size()
@@ -322,8 +291,8 @@ class Agent(object):
 		lossVal = losstensor.data[0]
 		return lossVal
 
-	def update_history_vec(self, qval):
+	def update_history_vec(self, location):
 		"updates history vector"
 		self.history_vec = self.history_vec[:-1]
-		self.history_vec = np.insert(self.history_vec, 0, qval, 0)
+		self.history_vec = np.insert(self.history_vec, 0,location.flatten(), 0)
 		pass

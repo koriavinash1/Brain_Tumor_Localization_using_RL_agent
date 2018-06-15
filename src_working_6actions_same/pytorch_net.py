@@ -21,8 +21,8 @@ import matplotlib.pyplot as plt
 from torchvision.models.resnet import model_urls as resnetmodel_urls
 from tqdm import tqdm
 
-from Networks import *
 from ReplayBuffer import *
+from Networks import *
 from helpers import *
 
 
