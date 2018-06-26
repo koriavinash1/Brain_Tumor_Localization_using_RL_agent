@@ -22,277 +22,303 @@ from torchvision.models.resnet import model_urls as resnetmodel_urls
 from tqdm import tqdm
 from skimage.transform import resize
 
+
 from ReplayBuffer import *
 from Networks import *
 from helpers import *
 
+use_cuda = torch.cuda.is_available()
+device   = torch.device("cuda" if use_cuda else "cpu")
+
 
 class Agent(object):
-	def __init__(self, max_steps=6, max_frames=5000, epsilon=1, verbose= True):
-		"init actions"
-		super(Agent, self).__init__()
-		self.state       = None
-		self.states      = []
-		self.action      = 0
-		self.reward      = 0
-		self.cum_reward  = 0
-		self.max_steps   = max_steps
-		self.max_frames  = max_frames
-		self.epsilon     = epsilon
-		self.curr_step   = 0
-		self.curr_frame  = 0
-		self.gamma       = 0.1 # discount factor
-		self.iou_thresh  = 0.5
-		self.prev_iou    = 0
-		self.memory_capacity    = 5000
-		self.terminal_reward    = 3
-		self.momentum_reward    = 1
-		self.number_of_actions  = 4 # 2 coordinates to define bounding box
-		self.history_of_actions = 4 # number of actions to be used as history in QNetwork
+    def __init__(self, max_steps=5, max_frames=5000, epsilon=1, verbose= True):
+        "init actions"
+        super(Agent, self).__init__()
+        self.max_steps   = max_steps
+        self.memory_capacity = max_frames
+        self.epsilon     = epsilon
+        self.gamma       = 0.1 # discount factor
+        self.iou_thresh  = 0.5
+        self.reshapesize = 64
+        self.terminal_reward    = 3
+        self.momentum_reward    = 1
+        self.number_of_actions  = 2 # 1 coordinates to define bounding box
+        self.exp_memory  = replayBuffer(self.memory_capacity)
+        self.state_shape = (128, 128)
+        # exp withour history information 
+        # self.history_vec = np.zeros((self.history_of_actions, self.number_of_actions))
 
-		self.history_vec = np.zeros((self.history_of_actions, self.number_of_actions))
-		self.exp_memory  = replayBuffer(self.memory_capacity)
+        self.done = False
+        self.verbose = verbose 
 
-		self.scale_subregion = float(3)/4
-		self.scale_mask      = float(1)/(self.scale_subregion*4)
-		self.cum_rewards     = []
-		self.done = False
-		self.verbose = verbose 
+        self.vnet  = ValueNetwork().to(device)
+        self.DPG   = PolicyNetowrk().to(device)
 
-		self.cnet = combinedNetwork(1024 + self.history_of_actions*self.number_of_actions, 
-							self.number_of_actions) # combined network fro training
+        self.tvnet = ValueNetwork().to(device)
+        self.tDPG  = PolicyNetowrk().to(device)
 
-	def reset(self):
-		"resets action and steps..."
-		self.state       = None
-		self.states      = []
-		self.region_masks= []
-		self.actions     = []
-		self.rewards     = []
-		self.ious        = []
-		self.action      = 1
-		self.reward      = 0
-		self.cum_reward  = 0
-		self.curr_step   = 0
-		self.curr_frame  = 0
-		self.prev_iou    = 0
-		self.curr_iou    = 0
-		self.offset      = (0, 0)
-		self.size_mask   = (224, 224)
-		# self.exp_memory  = replayBuffer(self.memory_capacity)
-		self.history_vec = np.zeros((self.history_of_actions, self.number_of_actions))
-		self.done        = False
+        for target_param, param in zip(self.tvnet.parameters(), self.vnet.parameters()):
+            target_param.data.copy_(param.data)
 
-	def buffer_reset(self):
-		"""
-		"""
-		self.exp_memory  = replayBuffer(self.memory_capacity)
+        for target_param, param in zip(self.tDPG.parameters(), self.DPG.parameters()):
+            target_param.data.copy_(param.data)
 
-	def step(self, state, gt_mask):
-		"""
+        # self.cnet  = combinedNetwork().to(device)
+        # self.tcnet = combinedNetwork().to(device)
 
-		"""
-		self.region_mask = np.zeros_like(gt_mask) + 1.0
-		self.curr_state = state
-		self.gt_mask = gt_mask
-		self.curr_step += 1
-		self.locations = self.get_action()
-		self.curr_iou  = calculate_iou(self.region_mask, self.gt_mask)
+        # for target_param, param in zip(self.tcnet.parameters(), self.cnet.parameters()):
+        #     target_param.data.copy_(param.data)
 
-		# for visualization....
-		self.states.append(self.curr_state)
-		self.region_masks.append(self.region_mask)
-		self.actions.append(self.locations)
-		self.rewards.append(self.reward)
-		self.ious.append(self.curr_iou)
 
-		shape = gt_mask.shape
-		locations = np.array([(0.5*(c[0]+1)*shape[0], 0.5*(c[1]+1)*shape[1]) for c in self.locations], dtype='int32')
-		locations[1, 0] = locations[0, 0] + abs(locations[1, 0] - locations[0, 0])
-		locations[1, 1] = locations[0, 1] + abs(locations[1, 1] - locations[0, 1]) 
+    def reset(self):
+        "resets action and steps..."
+        self.state       = None
+        self.states      = []
+        self.region_masks= []
+        self.actions     = []
+        self.rewards     = []
+        self.ious        = []
+        self.gts         = []
+        self.reward      = 0
+        self.cum_reward  = 0
+        self.curr_step   = 0
+        self.curr_frame  = 0
+        self.prev_iou    = 0
+        self.curr_iou    = 0
+        self.locations   = np.array([0.,0.])
+        self.size_mask   = self.state_shape
+        # self.exp_memory  = replayBuffer(self.memory_capacity)
+        # self.history_vec = np.zeros((self.history_of_actions, self.number_of_actions))
+        self.done        = False
 
-		if locations[1, 0] == locations[0, 0]: locations[1, 0] = locations[0, 0] + 32
+    def buffer_reset(self):
+        """
 
-		if locations[1, 1] == locations[0, 1]: locations[1, 1] = locations[0, 1] + 32
+        """
+        self.exp_memory  = replayBuffer(self.memory_capacity)
 
-		if (self.curr_step > self.max_steps) or (self.curr_iou < 0.05 and self.curr_step > 3):
-			self.reward = self.get_reward(terminal=True)
-			self.done = True
-			self.cum_rewards.append(np.sum(self.rewards))
-			
-		else:
-			self.reward = self.get_reward()
-		self.state = self.curr_state[:,:, locations[0, 0]:locations[1, 0], locations[0, 1]:locations[1, 1]]
-		self.state = F.adaptive_avg_pool2d(self.state, self.size_mask)
+    def step(self, state, gt_mask):
+        """
 
-		self.gt_mask = self.gt_mask[locations[0, 0]:locations[1, 0], locations[0, 1]:locations[1, 1]]
-		self.gt_mask = resize(self.gt_mask, self.size_mask)
+        """
+        self.region_mask = np.ones(self.size_mask)
+        self.curr_state = state
+        self.gt_mask = gt_mask
+        self.curr_step += 1
+        
+        # for visualization....
 
-		self.prev_iou = self.curr_iou
-		return self.curr_state, self.action, self.history_vec, self.reward, self.state, self.done
+        self.curr_iou  = calculate_iou(self.region_mask, self.gt_mask)
+        self.states.append(self.curr_state)
+        self.region_masks.append(self.region_mask)
+        self.gts.append(self.gt_mask)
+        self.actions.append(self.locations)
+        self.rewards.append(self.reward)
+        self.ious.append(self.curr_iou)
 
-	def get_reward(self, terminal=False):
+        self.locations = self.get_action()
+        locations = np.zeros((2, 2), dtype='int32')
+        shape = gt_mask.shape
 
-		if not terminal:
-			if self.curr_iou <= self.prev_iou:
-				reward = -1*self.momentum_reward
-			else:
-				reward = 1*self.momentum_reward
-		else:
-			if self.curr_iou > self.iou_thresh:
-				reward = 1*self.terminal_reward
-			else:
-				reward = -1*self.terminal_reward
+        # denormalize location values
+        temp = np.array([max(0, 0.5*(c+1)*shape[0] - 32) for c in self.locations[0]], dtype='int32')
 
-		return reward
+        locations[0, 0] = temp[0]
+        locations[0, 1] = temp[1]
+        locations[1, 0] = locations[0, 0] + self.reshapesize
+        locations[1, 1] = locations[0, 1] + self.reshapesize
 
-	def update_replay_buffer(self, _vec):
-		"push vec.  [old_state, action, reward, new_state, done]"
-		self.exp_memory.push(_vec)
-		pass
+        # if locations[1, 0] == locations[0, 0]: locations[1, 0] = locations[0, 0] + 32
+        # if locations[1, 1] == locations[0, 1]: locations[1, 1] = locations[0, 1] + 32
+        
+        self.state = self.curr_state[:,:, locations[0, 0]:locations[1, 0], locations[0, 1]:locations[1, 1]]
+        self.state = F.adaptive_avg_pool2d(self.state, self.size_mask)
 
-	def get_action(self):
-		"returns action for a given state..."
-		# terminating action
-		# curr_state shape > (32, 32, 3)
+        self.gt_mask = self.gt_mask[locations[0, 0]:locations[1, 0], locations[0, 1]:locations[1, 1]]
+        self.gt_mask = resize(self.gt_mask, self.size_mask, order = 0)
+        self.curr_iou  = calculate_iou(self.region_mask, self.gt_mask)
 
-		
-		if random.random() < self.epsilon:
-			locations = np.random.rand(2, 2)
-		
-		else:	
-			_hist = torch.autograd.Variable(torch.from_numpy(self.history_vec.reshape(1, self.history_of_actions*self.number_of_actions))).cuda()
-			_state = torch.autograd.Variable(self.curr_state.cuda())
-			locations = self.cnet(_state, _hist).detach().cpu().numpy()
-		
-		if self.verbose:
-			print ("Mask size: ", self.size_mask, "; Current IOU: ", self.curr_iou,  "; Done: ", self.done, "; Locations: ", locations, "; Reward: ", self.reward,  "; Exploration fraction: ", self.epsilon)
+        if (self.curr_step > self.max_steps) or (self.curr_iou > 0.9):
+            self.reward = self.get_reward(terminal=True)
+            self.done = True
 
-		self.update_history_vec(locations)
-		return locations
+            self.cum_rewards.append(np.sum(self.rewards))
+            self.states.append(self.state)
+            self.region_masks.append(self.region_mask)
+            self.gts.append(self.gt_mask)
+            self.actions.append(self.locations)
+            self.rewards.append(self.reward)
+            self.ious.append(self.curr_iou)
+            
+        else:
+            self.reward = self.get_reward()
+            
+        self.prev_iou = self.curr_iou
+        return self.curr_state, self.locations, self.reward, self.state, self.done, self.gt_mask
 
-	def visualization(self, path, save=False, display= False):
-		"saves an image for visualization also does contour based segmentation"
-		
-		if len(self.states) == 0:
-			return
-		else:
-			for i in range(len(self.states)):
-				plt.subplot(3, len(self.states), i+1)
-				plt.imshow(np.array(self.states[i].numpy()[0,0,:,:]), cmap = 'gray')
-				plt.title(' r:' + str(self.rewards[i]))
-				plt.xlabel('iou: {:.2f}'.format(self.ious[i]))
-				plt.gca().axes.get_xaxis().set_ticks([])
-				plt.gca().axes.get_yaxis().set_ticks([])
-				plt.subplot(3, len(self.states), len(self.states) + i+ 1)
-				plt.imshow(self.gt_mask, cmap='gray')
-				plt.gca().axes.get_xaxis().set_ticks([])
-				plt.gca().axes.get_yaxis().set_ticks([])
-				plt.subplot(3, len(self.states), 2*len(self.states) + i+ 1)
-				plt.imshow(self.region_masks[i], cmap='gray')
-				plt.gca().axes.get_xaxis().set_ticks([])
-				plt.gca().axes.get_yaxis().set_ticks([])
-			plt.savefig(path)
-		pass
+    def get_reward(self, terminal=False):
 
-	def plot_cum_reward(self, save = False):
-		save = False
-		pass
+        if not terminal:
+            if self.curr_iou <= self.prev_iou:
+                reward = -1*self.momentum_reward
+            else:
+                reward = 1*self.momentum_reward
+        else:
+            if self.curr_iou > self.iou_thresh:
+                reward = 1*self.terminal_reward
+            else:
+                reward = -1*self.terminal_reward
 
-	def generate_data(self, state, action, hist_vec, reward, next_state, done, batch_size = 32):
-		# print (state.shape, state[0].shape)
-		
-		return_state = torch.zeros(self.memory_capacity, 3, 224, 224).cuda()
-		return_y  = torch.zeros(self.memory_capacity, self.number_of_actions).cuda()
-		return_hist_vec  = torch.zeros(self.memory_capacity, self.history_of_actions*self.number_of_actions).cuda()
-		# print (hist_vec.shape, next_state.shape)
-		for i in range(int(self.memory_capacity/ batch_size)):
-			state_ = torch.autograd.Variable(torch.from_numpy(state[i*batch_size:(i+1)*batch_size,:,:,:,:].reshape(batch_size, 3, 224, 224)).cuda())
-			hist_vec_=torch.autograd.Variable(torch.from_numpy(hist_vec[i*batch_size:(i+1)*batch_size,:,:].reshape(batch_size,self.history_of_actions*self.number_of_actions)).cuda())
-			new_state_ = torch.autograd.Variable(torch.from_numpy(next_state[i*batch_size:(i+1)*batch_size,:,:,:,:].reshape(batch_size, 3, 224, 224)).cuda())
+        return reward
 
-			old_qval = self.cnet(state_, hist_vec_).detach().cpu().numpy()
-			new_qval = self.cnet(new_state_, hist_vec_).detach().cpu().numpy()
+    def update_replay_buffer(self, _vec):
+        "push vec.  [old_state, action, reward, new_state, done]"
+        self.exp_memory.push(_vec)
+        pass
 
-			max_qval = np.max(new_qval, 1)
-			y = np.zeros([len(state_), self.number_of_actions])
-			y = old_qval
+    def get_action(self):
+        "returns action for a given state..."
+        # terminating action
+        # curr_state shape > (32, 32, 3)
 
-			reward_ = reward[i*batch_size:(i+1)*batch_size]
-			action_ = action[i*batch_size:(i+1)*batch_size]
-			update = reward_
+        if random.random() < self.epsilon:
+            locations = np.random.rand(1, 2)
+        
+        else:   
+            _state = torch.FloatTensor(self.curr_state).to(device)
+            locations, _ = self.DPG(_state)
+            locations = locations.detach().cpu().numpy()
+        
+        if self.verbose:
+            print ("Mask size: ", self.size_mask, "; Current IOU: ", self.curr_iou,  "; Done: ", self.done, "; Locations: ", locations, "; Reward: ", self.reward,  "; Exploration fraction: ", self.epsilon)
 
-			update[action_ != self.number_of_actions] = reward_[action_ != self.number_of_actions] + self.gamma * max_qval[action_ != self.number_of_actions]
-			y[:, action_-1] = update #target output
+        # self.update_history_vec(locations)
+        return locations
 
-			y = torch.from_numpy(y).cuda()
+    def visualization(self, path, save=False, display= False):
+        "saves an image for visualization also does contour based segmentation"
+        
+        if len(self.states) == 0:
+            return
+        else:
+            for i in range(len(self.states)):
+                plt.subplot(2, len(self.states), i+1)
+                plt.imshow(np.array(self.states[i].numpy()[0,0,:,:]), cmap = 'gray')
+                plt.title(' r:' + str(self.rewards[i]))
+                plt.xlabel('iou: {:.2f}'.format(self.ious[i]))
+                plt.gca().axes.get_xaxis().set_ticks([])
+                plt.gca().axes.get_yaxis().set_ticks([])
+                plt.subplot(2, len(self.states), len(self.states) + i+ 1)
+                plt.imshow(self.gts[i], cmap='gray')
+                plt.gca().axes.get_xaxis().set_ticks([])
+                plt.gca().axes.get_yaxis().set_ticks([])
+                #plt.subplot(3, len(self.states), 2*len(self.states) + i+ 1)
+                #plt.imshow(self.region_masks[i], cmap='gray')
+                #plt.gca().axes.get_xaxis().set_ticks([])
+                #plt.gca().axes.get_yaxis().set_ticks([])
+            plt.savefig(path)
+        pass
 
-			return_state[i*batch_size:(i+1)*batch_size,:,:,:] = state_
-			return_hist_vec[i*batch_size:(i+1)*batch_size,:] = hist_vec_
-			return_y[i*batch_size:(i+1)*batch_size,:] = y
-		return return_state, return_hist_vec, return_y
+    def plot_cum_reward(self, save = False):
+        save = False
+        pass
 
-	def fit(self, batch_size=32):
-		"Weight update for combined network.."
-		#-------------------- SETTINGS: LOSS
-		loss = torch.nn.MSELoss()
-		optimizer = optim.Adam (self.cnet.parameters(),  lr=0.0001, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5)
-		scheduler = ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'max')
 
-		step = 0
-		prev_loss = float('inf')
-		state, action, hist_vec, reward, next_state, done = self.exp_memory.sample(self.memory_capacity)
-		X_state_train, X_hist_train, y_train = self.generate_data(state, action, hist_vec, reward, next_state, done)
+    def fit(self, batch_size=16, soft_tau=1e-2):
+        "Weight update for combined network.."
+        #-------------------- SETTINGS: LOSS
+        loss = torch.nn.MSELoss()
+        policy_optimizer = optim.Adam (self.cnet.parameters(),  lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5)
+        value_optimizer = optim.Adam (self.cnet.parameters(),  lr=0.0001, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5)
+        # scheduler = ReduceLROnPlateau(optimizer, factor = 0.1, patience = 5, mode = 'max')
 
-		for i in tqdm(range(int(self.memory_capacity/ batch_size))):
-			if step % 150 == 149:
-				loss_val = self.batch_valid(X_state_train[i*batch_size:(i+1)*batch_size, :, :, :], 
-							X_hist_train[i*batch_size:(i+1)*batch_size, :], 
-							y_train[i*batch_size:(i+1)*batch_size, :], 
-							loss)
-				if loss_val < prev_loss:
-					prev_loss = loss_val
-					model_name = '../models/cum_reward = ' + str(loss_val)+ '.pth.tar'
-					print ('Model saved -------- loss: {}'.format(loss_val))
-					torch.save(self.cnet, model_name)
-			else:
-				self.batch_train(X_state_train[i*batch_size:(i+1)*batch_size, :, :, :], 
-							X_hist_train[i*batch_size:(i+1)*batch_size, :], 
-							y_train[i*batch_size:(i+1)*batch_size, :], 
-							loss, 
-							optimizer)
-			step += 1
-		pass
+        step = 0
+        prev_loss = float('inf')
 
-	def batch_train(self, X_state_train, X_hist_train, y_train,loss,optimizer):
+        for i in tqdm(range(int(self.memory_capacity/ batch_size))):
+            state, action, reward, next_state, done = self.exp_memory.sample(batch_size)
 
-		varOutput = self.cnet(X_state_train, X_hist_train)
-		# print varInput.size(), varOutput.size(), target.size()
-		# varOutput = torch.FloatTensor([0])
-		# lossfn = loss(weights = weights)
+            state      = torch.FloatTensor(state).squeeze(1).to(device)
+            next_state = torch.FloatTensor(next_state).squeeze(1).to(device)
+            action     = torch.FloatTensor(action).squeeze(1).to(device)
+            reward     = torch.FloatTensor(reward).unsqueeze(1).to(device)
+            done       = torch.FloatTensor(np.float32(done)).unsqueeze(1).to(device)
 
-		lossvalue = loss(varOutput, y_train)
-		l2_reg = None
-		for W in self.cnet.parameters():
-		    if l2_reg is None:
-		        l2_reg = W.norm(2)
-		    else:
-		        l2_reg = l2_reg + W.norm(2)
+            if step % 150 == 149:
+                value_loss, policy_loss = self.batch_valid(state, next_state, action,reward. done, loss)
+                loss_val = value_loss
+                if loss_val < prev_loss:
+                    prev_loss = loss_val
+                    if os.path.exists('../exp5models'):
+                        os.mkdir('../exp5models')
 
-		lossvalue = lossvalue + l2_reg * 1e-3
-		optimizer.zero_grad()
-		lossvalue.backward()
-		optimizer.step()
-		pass
+                    model_name = '../exp5models/best_model.pth.tar'
+                    print ('Model saved -------- loss: {}'.format(loss_val))
+                    dict_ = {'value_net': self.vnet, 'policy_net': self.DPG}
+                    torch.save(dict_, model_name)
+                print ('----------- loss: {}'.format(loss_val))
+            else:
+                self.batch_train(state, next_state, action,reward, hist_vec, done, loss, policy_optimizer, value_optimizer)
+            step += 1
 
-	def batch_valid(self, X_state_train, X_hist_train, y_train, loss):
-		varOutput = self.cnet(X_state_train, X_hist_train)
-		losstensor = loss(varOutput, y_train)
-		lossVal = losstensor.data[0]
-		return lossVal
+        for target_param, param in zip(self.tvnet.parameters(), self.vnet.parameters()):
+            target_param.data.copy_(
+                target_param.data * (1.0 - soft_tau) + param.data * soft_tau
+            )
 
-	def update_history_vec(self, location):
-		"updates history vector"
-		self.history_vec = self.history_vec[:-1]
-		self.history_vec = np.insert(self.history_vec, 0,location.flatten(), 0)
-		pass
+        for target_param, param in zip(self.tDPG.parameters(), self.DPG.parameters()):
+            target_param.data.copy_(
+                target_param.data * (1.0 - soft_tau) + param.data * soft_tau
+            )
+
+        # for target_param, param in zip(self.tcnet.parameters(), self.cnet.parameters()):
+        #     target_param.data.copy_(
+        #         target_param.data * (1.0 - soft_tau) + param.data * soft_tau
+        #     )
+
+        pass
+
+    def batch_train(self, state, next_state, action,reward, hist_vec, done, loss, policy_optimizer, value_optimizer):
+
+        policy_loss = self.vnet(state, self.DPG(state))
+        policy_loss = -policy_loss.mean()
+
+        next_action    = self.tDPG(next_state)
+        target_value   = self.tDPG(next_state, next_action.detach())
+        expected_value = reward + (1.0 - done) * self.gamma * target_value
+        # expected_value = torch.clamp(expected_value, min_value, max_value)
+
+        value = self.vnet(state, action)
+        value_loss = loss(value, expected_value.detach())
+        
+        self.tvnet  = self.vnet.to(device)
+        self..tDPG  = self.DPG.to(device)
+
+        policy_optimizer.zero_grad()
+        policy_loss.backward()
+        policy_optimizer.step()
+
+        value_optimizer.zero_grad()
+        value_loss.backward()
+        value_optimizer.step()
+        pass
+
+    def batch_valid(self, state, next_state, action,reward, hist_vec, done, loss):
+        policy_loss = self.vnet(state, self.DPG(state))
+        policy_loss = -policy_loss.mean()
+
+        next_action    = self.tDPG(next_state)
+        target_value   = self.tDPG(next_state, next_action.detach())
+        expected_value = reward + (1.0 - done) * self.gamma * target_value
+        # expected_value = torch.clamp(expected_value, min_value, max_value)
+
+        value = self.vnet(state, action)
+        value_loss = loss(value, expected_value.detach())
+        return value_loss, policy_loss
+
+    def update_history_vec(self, location):
+        "updates history vector"
+        self.history_vec = self.history_vec[:-1]
+        self.history_vec = np.insert(self.history_vec, 0, location.flatten(), 0)
+        pass

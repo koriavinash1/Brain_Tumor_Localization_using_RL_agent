@@ -16,8 +16,8 @@ class replayBuffer(object):
 	def sample(self, batch_size=1):
 		# random sampling for training Q network
 		batch = random.sample(self.buffer, batch_size)
-		state, action, hist_vec, reward, next_state, done = map(np.stack, zip(*batch))
-		return state, action, hist_vec, reward, next_state, done
+		state, action, reward, next_state, done = map(np.stack, zip(*batch))
+		return state, action, reward, next_state, done
 
 	def push(self, _vec):
 		# _vec:[state, action, reward, next_state, done]
